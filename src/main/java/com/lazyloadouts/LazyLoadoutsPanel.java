@@ -80,11 +80,18 @@ class LazyLoadoutsPanel extends PluginPanel
 		void loadoutView(boolean on);
 
 		void dismissChanges();
+
+		/**
+		 * The player clicked an item they could buy: make it what the Grand Exchange search finds, or
+		 * stop doing so if it already is
+		 */
+		void findOnExchange(int itemId);
 	}
 
 
 	private static final int MAX_RECENT = 5;
 	private static final String NAME_SEPARATOR = ";";
+	private static final String PROGRESS_TITLE = "Best in slot";
 	private static final Icon STAR_ON = star(true);
 	private static final Icon STAR_OFF = star(false);
 	// a label only wraps its text when told how wide it is
@@ -111,6 +118,10 @@ class LazyLoadoutsPanel extends PluginPanel
 		 */
 		boolean affordable;
 		boolean owned;
+		/**
+		 * Whether it can be bought on the Grand Exchange
+		 */
+		boolean tradeable;
 	}
 
 	private final List<Activity> activities;
@@ -165,6 +176,10 @@ class LazyLoadoutsPanel extends PluginPanel
 
 	private Activity activity;
 	private boolean hasSpecials;
+	/**
+	 * The item the Grand Exchange search has been set to find, or -1
+	 */
+	private int soughtItem = -1;
 	// set while the setups are being filled in, so that doing it doesn't count as the player picking one
 	private boolean filling;
 
@@ -248,7 +263,7 @@ class LazyLoadoutsPanel extends PluginPanel
 		progressRow.setToolTipText("How many gear slots, over every setup, you own the wiki's top pick for");
 		progressRow.add(progressText, BorderLayout.CENTER);
 		progressRow.add(progressValue, BorderLayout.EAST);
-		clickable(progressRow, () -> showList("Best in slot", progressSummary, progressItems));
+		clickable(progressRow, () -> showList(PROGRESS_TITLE, progressSummary, progressItems));
 		setProgress(null, "Open your bank once, and this will show how much of the best gear you own.", new ArrayList<>());
 
 		stack(finder, changesRow, 6);
@@ -359,6 +374,11 @@ class LazyLoadoutsPanel extends PluginPanel
 			progressValue.setText(share == null ? "" : share);
 			progressSummary = summary;
 			progressItems = items;
+			// the player may be looking at it, waiting for the bank to fill it in
+			if (lister.isVisible() && listTitle.getText().equals(PROGRESS_TITLE))
+			{
+				showList(PROGRESS_TITLE, summary, items);
+			}
 		});
 	}
 
@@ -384,6 +404,22 @@ class LazyLoadoutsPanel extends PluginPanel
 		{
 			hint.setText(WRAP + text);
 			hint.setVisible(true);
+		});
+	}
+
+	/**
+	 * Marks the item the Grand Exchange search has been set to find
+	 *
+	 * @param itemId the item, or -1 for none
+	 */
+	void setSought(int itemId)
+	{
+		SwingUtilities.invokeLater(() ->
+		{
+			soughtItem = itemId;
+			upgrades.refresh();
+			specials.refresh();
+			listItems.refresh();
 		});
 	}
 
@@ -772,14 +808,21 @@ class LazyLoadoutsPanel extends PluginPanel
 	private class GearList extends JPanel
 	{
 		private final List<GearRow> pool = new ArrayList<>();
+		private List<Gear> items = new ArrayList<>();
 
 		GearList()
 		{
 			super(new GridBagLayout());
 		}
 
+		void refresh()
+		{
+			show(items);
+		}
+
 		void show(List<Gear> items)
 		{
+			this.items = items;
 			while (pool.size() < items.size())
 			{
 				GearRow row = new GearRow();
@@ -803,6 +846,7 @@ class LazyLoadoutsPanel extends PluginPanel
 		private final JLabel name = new JLabel();
 		private final JLabel caption = new JLabel();
 		private final JLabel price = new JLabel();
+		private Gear gear;
 
 		GearRow()
 		{
@@ -824,16 +868,55 @@ class LazyLoadoutsPanel extends PluginPanel
 			add(icon, BorderLayout.WEST);
 			add(text, BorderLayout.CENTER);
 			add(price, BorderLayout.EAST);
+
+			addMouseListener(new MouseAdapter()
+			{
+				@Override
+				public void mousePressed(MouseEvent e)
+				{
+					if (buyable())
+					{
+						actions.findOnExchange(gear.getItemId());
+					}
+				}
+
+				@Override
+				public void mouseEntered(MouseEvent e)
+				{
+					if (buyable())
+					{
+						setBackground(ColorScheme.DARKER_GRAY_HOVER_COLOR);
+					}
+				}
+
+				@Override
+				public void mouseExited(MouseEvent e)
+				{
+					setBackground(ColorScheme.DARKER_GRAY_COLOR);
+				}
+			});
+		}
+
+		private boolean buyable()
+		{
+			return gear != null && gear.isTradeable() && !gear.isOwned();
 		}
 
 		void show(Gear gear)
 		{
+			this.gear = gear;
+			boolean sought = gear.getItemId() == soughtItem && buyable();
+			setCursor(Cursor.getPredefinedCursor(buyable() ? Cursor.HAND_CURSOR : Cursor.DEFAULT_CURSOR));
+			setToolTipText(!buyable() ? null : sought
+				? "Click to give the Grand Exchange search back"
+				: "Click to have the Grand Exchange buy search show this item");
+
 			icon.setIcon(null);
 			itemManager.getImage(gear.getItemId()).addTo(icon);
 			name.setText(gear.getName());
-			name.setToolTipText(gear.getName());
-			caption.setText(gear.getCaption());
-			caption.setToolTipText(gear.getCaption());
+			name.setForeground(sought ? ColorScheme.BRAND_ORANGE : ColorScheme.TEXT_COLOR);
+			caption.setText(sought ? "Shown in the GE buy search" : gear.getCaption());
+			caption.setForeground(sought ? ColorScheme.BRAND_ORANGE : ColorScheme.LIGHT_GRAY_COLOR);
 
 			price.setToolTipText(null);
 			if (gear.isOwned())

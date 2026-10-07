@@ -42,6 +42,14 @@ Untick **Show in bank** to get your normal bank back without losing your place i
 pick a setup with the bank closed, the tab opens the next time you open the bank. Nothing in your
 real bank is moved: the tab is a Bank Tags layout, so the core Bank Tags plugin must be enabled.
 
+### Buying an upgrade
+
+Click an item in the side panel that you don't own and that the Grand Exchange sells. The buy
+offer's search shows that item as the only result, for you to click. It doesn't matter whether you
+pick the item before or after opening the search, and picking another swaps it. Typing anything
+gets the ordinary search back, and the plugin lets go of the search once the offer is placed, or
+when you click the item in the panel again.
+
 ## The list
 
 - **Star** an activity to keep it under Favorites at the top. Your last five picks are under Recent.

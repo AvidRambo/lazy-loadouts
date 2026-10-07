@@ -29,20 +29,28 @@ import javax.swing.SwingUtilities;
 import lombok.Getter;
 import lombok.Value;
 import net.runelite.api.Client;
+import net.runelite.api.FontID;
 import net.runelite.api.GameState;
+import net.runelite.api.GrandExchangeOfferState;
 import net.runelite.api.Item;
 import net.runelite.api.ItemContainer;
 import net.runelite.api.Skill;
 import net.runelite.api.events.GameStateChanged;
 import net.runelite.api.events.GameTick;
+import net.runelite.api.events.GrandExchangeOfferChanged;
+import net.runelite.api.events.GrandExchangeSearched;
+import net.runelite.api.events.ScriptPostFired;
 import net.runelite.api.events.WidgetLoaded;
 import net.runelite.api.gameval.DBTableID;
 import net.runelite.api.gameval.InterfaceID;
 import net.runelite.api.gameval.InventoryID;
 import net.runelite.api.gameval.ItemID;
+import net.runelite.api.gameval.VarClientID;
 import net.runelite.api.gameval.VarPlayerID;
 import net.runelite.api.gameval.VarbitID;
 import net.runelite.api.widgets.Widget;
+import net.runelite.api.widgets.WidgetTextAlignment;
+import net.runelite.api.widgets.WidgetType;
 import net.runelite.client.callback.ClientThread;
 import net.runelite.client.config.ConfigManager;
 import net.runelite.client.eventbus.Subscribe;
@@ -58,6 +66,7 @@ import net.runelite.client.plugins.banktags.TagManager;
 import net.runelite.client.plugins.banktags.tabs.Layout;
 import net.runelite.client.plugins.banktags.tabs.LayoutManager;
 import net.runelite.client.ui.ClientToolbar;
+import net.runelite.client.ui.JagexColors;
 import net.runelite.client.ui.NavigationButton;
 import net.runelite.client.ui.overlay.OverlayManager;
 import net.runelite.client.util.QuantityFormatter;
@@ -85,6 +94,18 @@ public class LazyLoadoutsPlugin extends Plugin
 	/**
 	 * Names of gear that has to be charged or repaired before it is any use
 	 */
+	/**
+	 * What the plugin puts in the Grand Exchange search to say that the results are its own
+	 */
+	private static final String EXCHANGE_SEARCH = "lazy-loadouts";
+	/**
+	 * The script that runs once the chatbox search has been built
+	 */
+	private static final int SEARCHBOX_LOADED = 750;
+	/**
+	 * The chatbox search mode that looks for an item to trade on the Grand Exchange
+	 */
+	private static final int EXCHANGE_SEARCH_MODE = 14;
 	private static final Pattern DRAINED = Pattern.compile(".*(\\((uncharged|empty|inactive|broken|u)\\)| 0)$");
 
 	/**
@@ -181,6 +202,12 @@ public class LazyLoadoutsPlugin extends Plugin
 	private volatile Set<Integer> tabItems = new HashSet<>();
 	@Getter
 	private volatile Shown shown;
+	/**
+	 * The item the player asked the Grand Exchange search to find, or -1
+	 */
+	private volatile int soughtItem = -1;
+	// the line the plugin puts over the Grand Exchange search box while the search is its own
+	private Widget exchangeTitle;
 
 	@Provides
 	LazyLoadoutsConfig provideConfig(ConfigManager configManager)
@@ -251,6 +278,12 @@ public class LazyLoadoutsPlugin extends Plugin
 			{
 				configManager.setConfiguration(LazyLoadoutsConfig.GROUP, "seenChanges", changes.getVersion());
 			}
+
+			@Override
+			public void findOnExchange(int itemId)
+			{
+				seek(itemId == soughtItem ? -1 : itemId);
+			}
 		});
 		panel.setLoggedIn(client.getGameState() == GameState.LOGGED_IN);
 
@@ -280,6 +313,7 @@ public class LazyLoadoutsPlugin extends Plugin
 	 */
 	private void close()
 	{
+		seek(-1);
 		shown = null;
 		loadout = null;
 		waitingForBank = false;
@@ -296,6 +330,126 @@ public class LazyLoadoutsPlugin extends Plugin
 		if (TAG.equals(bankTagsService.getActiveTag()))
 		{
 			bankTagsService.closeBankTag();
+		}
+	}
+
+	private void seek(int itemId)
+	{
+		soughtItem = itemId;
+		panel.setSought(itemId);
+		// the search may already be open, waiting for an item or showing the last one picked
+		clientThread.invokeLater(() ->
+		{
+			Widget layer = client.getWidget(InterfaceID.Chatbox.MES_LAYER);
+			if (exchangeOpen() && layer != null && !layer.isHidden()
+				&& client.getVarcIntValue(VarClientID.MESLAYERMODE) == EXCHANGE_SEARCH_MODE)
+			{
+				searchExchange();
+			}
+		});
+	}
+
+	private boolean exchangeOpen()
+	{
+		Widget exchange = client.getWidget(InterfaceID.GeOffers.UNIVERSE);
+		return exchange != null && !exchange.isHidden();
+	}
+
+	/**
+	 * When the player opens a Grand Exchange search with an item picked in the panel, starts the search
+	 * off as one for that item, the way Quest Helper does for a quest's items. The player still opens
+	 * the offer and picks the result themselves, and typing anything gets the ordinary search back.
+	 */
+	@Subscribe
+	public void onScriptPostFired(ScriptPostFired event)
+	{
+		if (event.getScriptId() == SEARCHBOX_LOADED)
+		{
+			// the search is built afresh each time it opens, without anything added to it before
+			exchangeTitle = null;
+			if (soughtItem != -1 && exchangeOpen())
+			{
+				client.setVarcIntValue(VarClientID.MESLAYERMODE, EXCHANGE_SEARCH_MODE);
+				// scripts can't be run from inside one
+				clientThread.invokeLater(this::searchExchange);
+			}
+		}
+	}
+
+	/**
+	 * Makes the open Grand Exchange search one for the item picked in the panel, or an ordinary search
+	 * again if no item is picked any more
+	 */
+	private void searchExchange()
+	{
+		Widget box = client.getWidget(InterfaceID.Chatbox.MES_TEXT2);
+		Widget layer = client.getWidget(InterfaceID.Chatbox.MES_LAYER);
+		if (box == null || layer == null || box.getOnKeyListener() == null)
+		{
+			return;
+		}
+
+		boolean ours = EXCHANGE_SEARCH.equals(client.getVarcStrValue(VarClientID.MESLAYERINPUT));
+		int itemId = soughtItem;
+		if (itemId == -1 && !ours)
+		{
+			return;
+		}
+
+		// the search box's own key listener is what runs the search
+		client.setVarcStrValue(VarClientID.MESLAYERINPUT, itemId == -1 ? "" : EXCHANGE_SEARCH);
+		client.runScript(box.getOnKeyListener());
+
+		// A title stands in for the box, which would show the marker as if it had been typed
+		box.setHidden(itemId != -1);
+		if (exchangeTitle == null && itemId != -1)
+		{
+			exchangeTitle = layer.createChild(-1, WidgetType.TEXT);
+			exchangeTitle.setOriginalWidth(box.getWidth());
+			exchangeTitle.setOriginalHeight(box.getHeight());
+			exchangeTitle.setOriginalX(0);
+			exchangeTitle.setOriginalY(0);
+			exchangeTitle.setXTextAlignment(WidgetTextAlignment.CENTER);
+			exchangeTitle.setYTextAlignment(WidgetTextAlignment.CENTER);
+			exchangeTitle.setFontId(FontID.BOLD_12);
+			exchangeTitle.setTextShadowed(false);
+			exchangeTitle.setTextColor(JagexColors.CHAT_GAME_EXAMINE_TEXT_OPAQUE_BACKGROUND.getRGB());
+		}
+		if (exchangeTitle != null)
+		{
+			exchangeTitle.setHidden(itemId == -1);
+			if (itemId != -1)
+			{
+				exchangeTitle.setText("<col=b40000>Lazy Loadouts</col> " + name(itemId));
+			}
+			exchangeTitle.revalidate();
+		}
+	}
+
+	@Subscribe
+	public void onGrandExchangeSearched(GrandExchangeSearched event)
+	{
+		int itemId = soughtItem;
+		if (itemId == -1 || event.isConsumed() || !EXCHANGE_SEARCH.equals(client.getVarcStrValue(VarClientID.MESLAYERINPUT)))
+		{
+			return;
+		}
+
+		event.consume();
+		client.setGeSearchResultIndex(0);
+		client.setGeSearchResultCount(1);
+		client.setGeSearchResultIds(new short[]{(short) itemId});
+	}
+
+	@Subscribe
+	public void onGrandExchangeOfferChanged(GrandExchangeOfferChanged event)
+	{
+		// once the offer is in, the search goes back to normal
+		GrandExchangeOfferState state = event.getOffer().getState();
+		if (event.getOffer().getItemId() == soughtItem
+			&& (state == GrandExchangeOfferState.BUYING || state == GrandExchangeOfferState.BOUGHT))
+		{
+			seek(-1);
 		}
 	}
 
@@ -449,7 +603,7 @@ public class LazyLoadoutsPlugin extends Plugin
 	}
 
 	/**
-	 * Takes stock of what the player has. Only the open bank says what is in it.
+	 * Takes stock of what the player has, going by the bank as it was when last open
 	 */
 	private void lookAtBank()
 	{
@@ -486,14 +640,16 @@ public class LazyLoadoutsPlugin extends Plugin
 			return;
 		}
 
-		if (!bankOpen())
+		// The game remembers what was in the bank after it is closed, so the panel can be filled in
+		// away from one, as long as the bank has been opened once. The tab has to wait for the bank.
+		boolean bankOpen = bankOpen();
+		waitingForBank = !bankOpen;
+		if (!bankOpen && client.getItemContainer(InventoryID.BANK) == null)
 		{
-			waitingForBank = true;
-			panel.setLadder(notes(activity), "Upgrades", new ArrayList<>(), "Open your bank to see this setup.", new ArrayList<>());
-			panel.setLoadout(notes(activity), "Open your bank to see this setup.");
+			panel.setLadder(notes(activity), "Upgrades", new ArrayList<>(), "Open your bank once, so this can see what you own.", new ArrayList<>());
+			panel.setLoadout(notes(activity), "Open your bank once, so this can see what you own.");
 			return;
 		}
-		waitingForBank = false;
 		lookAtBank();
 
 		int[] layout;
@@ -555,7 +711,7 @@ public class LazyLoadoutsPlugin extends Plugin
 		shown = new Shown(layout, labels, needs);
 
 		layoutManager.saveLayout(new Layout(TAG, layout));
-		if (inBank)
+		if (inBank && bankOpen)
 		{
 			bankTagsService.openBankTag(TAG, 0);
 		}
@@ -737,7 +893,8 @@ public class LazyLoadoutsPlugin extends Plugin
 	private LazyLoadoutsPanel.Gear gear(String caption, int itemId, long coins, boolean owned)
 	{
 		long price = itemManager.getItemPrice(itemId);
-		return new LazyLoadoutsPanel.Gear(caption, itemId, name(itemId), price, price > 0 && price <= coins, owned);
+		return new LazyLoadoutsPanel.Gear(caption, itemId, name(itemId), price, price > 0 && price <= coins, owned,
+			itemManager.getItemComposition(itemId).isGeTradeable());
 	}
 
 	private String name(int itemId)

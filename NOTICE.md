@@ -13,6 +13,11 @@ that file.
 Monster types and elemental weaknesses come from the data the wiki publishes for its DPS calculator,
 [weirdgloop/osrs-dps-calc](https://github.com/weirdgloop/osrs-dps-calc).
 
+## Quest Helper
+
+The way the Grand Exchange search is started off with an item is adapted from
+[Quest Helper](https://github.com/Zoinkwiz/quest-helper) (BSD 2-Clause, Copyright (c) 2020, Zoinkwiz).
+
 ## Loadout Lab
 
 `requirements.json` (the skill levels needed to equip an item) is derived from

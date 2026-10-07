@@ -7,5 +7,5 @@ build
 nbactions.xml
 nb-configuration.xml
 nbproject/
-*.class.gradle
+*.class
 .cache
